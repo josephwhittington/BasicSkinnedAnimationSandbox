@@ -588,6 +588,7 @@ void ApplyInverseBindPose()
 	float lerp_ratio = 0.0f;
 	float key_time = model.clip.keyframes[current_frame].time;
 
+	//lerp_ratio = elapsed_time /(key_time);
 	lerp_ratio = elapsed_time /(key_time);
 
 	if (lerp_ratio < 0) lerp_ratio == 0;
@@ -604,7 +605,6 @@ void ApplyInverseBindPose()
 
 	for (int i = 0; i < model.clip.keyframes[current_frame].joints.size(); i++)
 	{
-		//XMMATRIX joint = model.clip.keyframes[current_frame].xmjoints[i];
 		XMMATRIX joint;
 		LerpMatrix(model.clip.keyframes[current_frame].xmjoints[i], model.clip.keyframes[next_frame].xmjoints[i], joint, lerp_ratio);
 		XMMATRIX inv = model.bind_invs[i];
@@ -649,7 +649,7 @@ void Animate()
 		if (debug.current_keyframe > model.clip.keyframes.size() - 1)
 		{
 			debug.timer = 0;
-			debug.current_keyframe = 0;
+			debug.current_keyframe = 1;
 		}
 	}
 }
@@ -974,6 +974,7 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 	int dataptr = 0;
 	memcpy((char*)&model.clip.duration, buffer, sizeof(float));
 	dataptr += sizeof(float);
+	model.clip.duration *= 1.5;
 
 	// Read in each keyframe
 	int joint_transform_bytes_per_keyframe = sizeof(joint) * header.joint_count;
@@ -981,6 +982,8 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 	{
 		// Copy the duration
 		memcpy(&model.clip.keyframes[i].time, &buffer[dataptr], sizeof(float));
+		// Remove
+		model.clip.keyframes[i].time *= 1.5;
 		dataptr += sizeof(float);
 		// Copy the "joints"
 		memcpy(model.clip.keyframes[i].joints.data(), &buffer[dataptr], joint_transform_bytes_per_keyframe);
