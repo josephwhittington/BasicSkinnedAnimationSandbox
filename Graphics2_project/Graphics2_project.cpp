@@ -974,7 +974,6 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 	int dataptr = 0;
 	memcpy((char*)&model.clip.duration, buffer, sizeof(float));
 	dataptr += sizeof(float);
-	model.clip.duration *= 1.5;
 
 	// Read in each keyframe
 	int joint_transform_bytes_per_keyframe = sizeof(joint) * header.joint_count;
@@ -983,7 +982,6 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 		// Copy the duration
 		memcpy(&model.clip.keyframes[i].time, &buffer[dataptr], sizeof(float));
 		// Remove
-		model.clip.keyframes[i].time *= 1.5;
 		dataptr += sizeof(float);
 		// Copy the "joints"
 		memcpy(model.clip.keyframes[i].joints.data(), &buffer[dataptr], joint_transform_bytes_per_keyframe);
