@@ -46,6 +46,7 @@ float aspectRatio = 1;
 // Shader variables
 ID3D11Buffer* constantBuffer;
 ID3D11Buffer* lightBuffer;
+ID3D11Buffer* animationCBuffer;
 // Shader variables
 
 // Z buffer
@@ -93,7 +94,6 @@ struct Model
 {
 	std::vector<AnimVertex> vertices;
 	std::vector<int> indices;
-	std::vector<XMMATRIX> joints;
 
 	XMFLOAT3 position;
 
@@ -115,6 +115,9 @@ struct Model
 
 	// Animation
 	animation_clip clip;
+	std::vector<XMMATRIX> joints;
+	std::vector<XMMATRIX> bind_invs;
+	std::vector<XMFLOAT4X4> vs_joints;
 };
 
 enum class LIGHTTYPE
@@ -139,6 +142,7 @@ struct Light
 struct BUFFERS
 {
 	ID3D11Buffer* c_bufer;
+	ID3D11Buffer* animation_buffer;
 };
 
 // Models
@@ -171,11 +175,13 @@ void LoadTextures(Header& header, Model& _model);
 void InitializeWModel(Model& _model, const char* modelname, XMFLOAT3 position, const BYTE* _vs, const BYTE* _ps, int vs_size, int ps_size);
 void CleanupModel(Model& model);
 
+void ApplyInverseBindPose();
 void UpdateSkeleton(float time);
 void Animate();
 
 // Utility
 float lerp(float current, float next, float f);
+void LerpMatrix(const XMMATRIX& start, const XMMATRIX& end, XMMATRIX& store, float ratio);
 // Utility
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -209,10 +215,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	{
 		// Timing
 		debug.xtime.Signal();
-		debug.timer += static_cast<float>(debug.xtime.Delta());
+		debug.timer += static_cast<float>(debug.xtime.SmoothDelta());
 		debug.key_timer += static_cast<float>(debug.xtime.Delta());
 		Animate();
 		UpdateSkeleton(debug.timer);
+		ApplyInverseBindPose();
 
 		PeekMessage(&msg, NULL, 0, 0, PM_REMOVE);
 		if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
@@ -234,7 +241,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		ID3D11RenderTargetView* tempRTV[] = { renderTargetView };
 		deviceContext->OMSetRenderTargets(1, tempRTV, depthStencil);
 
-		float color[4] = { 0, 0, 0, 1 };
+		float color[4] = { .2, .2, .2, 1 };
 		deviceContext->ClearRenderTargetView(renderTargetView, color);
 		deviceContext->ClearDepthStencilView(depthStencil, D3D11_CLEAR_DEPTH, 1, 0);
 
@@ -261,11 +268,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		// Send the matrix to constant buffer
 		D3D11_MAPPED_SUBRESOURCE gpuBuffer;
 		HRESULT result = deviceContext->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &gpuBuffer);
+		ASSERT_HRESULT_SUCCESS(result);
 		memcpy(gpuBuffer.pData, &WORLD, sizeof(WORLD));
 		deviceContext->Unmap(constantBuffer, 0);
+
+		D3D11_MAPPED_SUBRESOURCE animSub;
+		result = deviceContext->Map(animationCBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &animSub);
+		ASSERT_HRESULT_SUCCESS(result);
+		memcpy(animSub.pData, model.vs_joints.data(), sizeof(XMFLOAT4X4) * model.clip.keyframes[0].fmjoints.size());
+		deviceContext->Unmap(animationCBuffer, 0);
+
 		// Connect constant buffer to the pipeline
-		ID3D11Buffer* teapotCBuffers[] = { constantBuffer };
-		deviceContext->VSSetConstantBuffers(0, 1, teapotCBuffers);
+		ID3D11Buffer* teapotCBuffers[] = { constantBuffer, animationCBuffer };
+		deviceContext->VSSetConstantBuffers(0, 2, teapotCBuffers);
 
 		// sET THE PIPELINE
 		UINT teapotstrides[] = { sizeof(AnimVertex) };
@@ -347,6 +362,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	D3DSAFE_RELEASE(renderTargetView);
 	D3DSAFE_RELEASE(constantBuffer);
 	D3DSAFE_RELEASE(lightBuffer);
+	D3DSAFE_RELEASE(animationCBuffer);
 
 	D3DSAFE_RELEASE(rasterizerStateDefault);
 	D3DSAFE_RELEASE(rasterizerStateWireframe);
@@ -448,8 +464,11 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
    HRESULT result;
 
+#ifdef DEBUG
    result = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_DEBUG, &DX11, 1, D3D11_SDK_VERSION, &swap, &swapchain, &device, 0, &deviceContext);
-
+#else
+   result = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_DEBUG, &DX11, 1, D3D11_SDK_VERSION, &swap, &swapchain, &device, 0, &deviceContext);
+#endif
 
    ID3D11Resource* backbuffer;
    result = swapchain->GetBuffer(0, __uuidof(backbuffer), (void**)&backbuffer);
@@ -509,7 +528,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    light.diffuse = light.specular = XMFLOAT4(1, 1, 1, 1);
    light.diffuseIntensity = 1;
    light.specularIntensity = .4;
-   light.position = XMFLOAT4(2, 3, -5, 1);
+   light.position = XMFLOAT4(0, 1, -5, 1);
    light.lightRadius = 100;
    lights.push_back(light);
    // Lights go here
@@ -560,6 +579,65 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    return TRUE;
 }
 
+void ApplyInverseBindPose()
+{
+	int current_frame = debug.current_keyframe;
+
+	// Compute blend ratio
+	float elapsed_time = debug.timer;
+	float lerp_ratio = 0.0f;
+	float key_time = model.clip.keyframes[current_frame].time;
+
+	lerp_ratio = elapsed_time /(key_time);
+
+	if (lerp_ratio < 0) lerp_ratio == 0;
+	if (lerp_ratio > 1) lerp_ratio == 1;
+
+	if (current_frame == 0)
+		lerp_ratio = 0;
+
+	int next_frame = current_frame + 1;
+	if (next_frame > model.clip.keyframes.size() - 1)
+		next_frame = 0;
+
+	XMFLOAT4X4 t4;
+
+	for (int i = 0; i < model.clip.keyframes[current_frame].joints.size(); i++)
+	{
+		//XMMATRIX joint = model.clip.keyframes[current_frame].xmjoints[i];
+		XMMATRIX joint;
+		LerpMatrix(model.clip.keyframes[current_frame].xmjoints[i], model.clip.keyframes[next_frame].xmjoints[i], joint, lerp_ratio);
+		XMMATRIX inv = model.bind_invs[i];
+
+		XMMATRIX temp = XMMatrixMultiply(inv, joint);
+		XMStoreFloat4x4(&t4, temp);
+		model.vs_joints[i] = t4;
+	}
+}
+
+void LerpMatrix(const XMMATRIX& start, const XMMATRIX& end, XMMATRIX& store, float ratio)
+{
+	// Quaternion shit
+	DirectX::XMMATRIX a = start;
+	DirectX::XMMATRIX b = end;
+	DirectX::XMMATRIX temp_a = DirectX::XMMATRIX(a.r[0], a.r[1], a.r[2], DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f));
+	DirectX::XMVECTOR quaternion_a = DirectX::XMQuaternionNormalize(DirectX::XMQuaternionRotationMatrix(temp_a));
+
+	DirectX::XMMATRIX temp_b = DirectX::XMMATRIX(b.r[0], b.r[1], b.r[2], DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f));
+	DirectX::XMVECTOR quaternion_b = DirectX::XMQuaternionNormalize(DirectX::XMQuaternionRotationMatrix(temp_b));
+	DirectX::XMVECTOR quaternion_c = DirectX::XMQuaternionSlerp(quaternion_a, quaternion_b, ratio);
+
+	// Interpolate position
+	XMVECTOR position;
+	position.m128_f32[0] = lerp(start.r[3].m128_f32[0], end.r[3].m128_f32[0], ratio);
+	position.m128_f32[1] = lerp(start.r[3].m128_f32[1], end.r[3].m128_f32[1], ratio);
+	position.m128_f32[2] = lerp(start.r[3].m128_f32[2], end.r[3].m128_f32[2], ratio);
+	position.m128_f32[3] = 1;
+
+	store = DirectX::XMMatrixRotationQuaternion(quaternion_c);
+	store = DirectX::XMMATRIX(store.r[0], store.r[1], store.r[2], position);
+}
+
 void Animate()
 {
 	float time = debug.timer;
@@ -596,7 +674,7 @@ void UpdateSkeleton(float time)
 		float lerp_ratio = 0.0f;
 		float key_time = model.clip.keyframes[debug.current_keyframe].time;
 
-		lerp_ratio = (key_time) / elapsed_time;
+		lerp_ratio = elapsed_time / key_time;
 		if (debug.current_keyframe == 0)
 			lerp_ratio = 0;
 
@@ -649,7 +727,7 @@ void UpdateSkeleton(float time)
 		float lerp_ratio = 0.0f;
 		float key_time = model.clip.keyframes[debug.current_keyframe].time;
 
-		lerp_ratio = (key_time) / elapsed_time;
+		lerp_ratio = elapsed_time / key_time;
 		if (debug.current_keyframe == 0)
 			lerp_ratio = 0;
 
@@ -718,10 +796,29 @@ void InitializeWModel(Model& _model, const char* modelname, XMFLOAT3 position, c
 	{
 		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
 		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+		{ "JOINTS", 0, DXGI_FORMAT_R32G32B32A32_SINT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+		{ "WEIGHTS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 40, D3D11_INPUT_PER_VERTEX_DATA, 0},
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 56, D3D11_INPUT_PER_VERTEX_DATA, 0},
 	};
 
 	result = device->CreateInputLayout(tempInputElementDesc, ARRAYSIZE(tempInputElementDesc), _vs, vs_size, &_model.vertexBufferLayout);
+	ASSERT_HRESULT_SUCCESS(result);
+
+	// Add constant buffer for the animation data
+	// Create animation buffer
+	D3D11_BUFFER_DESC animationBuffer;
+	D3D11_SUBRESOURCE_DATA animationsubresource;
+	ZeroMemory(&animationBuffer, sizeof(D3D11_BUFFER_DESC));
+	ZeroMemory(&animationsubresource, sizeof(D3D11_SUBRESOURCE_DATA));
+
+	animationBuffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	animationBuffer.ByteWidth = sizeof(XMFLOAT4X4)* model.clip.keyframes[0].fmjoints.size();
+	animationBuffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+	animationBuffer.MiscFlags = 0;
+	animationBuffer.StructureByteStride = 0;
+	animationBuffer.Usage = D3D11_USAGE_DYNAMIC;
+
+	result = device->CreateBuffer(&animationBuffer, nullptr, &animationCBuffer);
 	ASSERT_HRESULT_SUCCESS(result);
 
 	// Make the necessary things for the debug render
@@ -853,14 +950,24 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 
 	// Read in the animation data
 	file.read((char*)buffer, animation_clip_size);
+
+	// Read in bind pose transform data
+	int bind_buffer_size = header.joint_count * sizeof(MAT4X4);
+	char* bind_buffer = new char[bind_buffer_size];
+	file.read(bind_buffer, bind_buffer_size);
+
 	file.close();
 
 	// Resize the thing to hold the data
 	model.clip.keyframes.resize(header.keyframe_count);
+	model.vs_joints.resize(header.joint_count);
+	model.bind_invs.resize(header.joint_count);
+
 	for (int i = 0; i < model.clip.keyframes.size(); i++)
 	{
 		model.clip.keyframes[i].joints.resize(header.joint_count);
 		model.clip.keyframes[i].xmjoints.resize(header.joint_count);
+		model.clip.keyframes[i].fmjoints.resize(header.joint_count);
 	}
 
 	// Read in duration
@@ -881,6 +988,7 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 	}
 
 	XMMATRIX temp;
+	XMFLOAT4X4 ftemp;
 	for (int i = 0; i < header.keyframe_count; i++)
 	{
 		for (int j = 0; j < header.joint_count; j++)
@@ -891,7 +999,23 @@ void LoadAnimationWobjectMesh(const char* meshname, std::vector<AnimVertex>& ver
 			memcpy(&temp.r[3].m128_f32, &model.clip.keyframes[i].joints[j].transform.data[12], sizeof(float) * 4);
 
 			model.clip.keyframes[i].xmjoints[j] = temp;
+
+			XMStoreFloat4x4(&ftemp, temp);
+			model.clip.keyframes[i].fmjoints[j] = ftemp;
 		}
+	}
+
+	// Load inverse shit
+	int bind_buffer_ptr = 0;
+	int row_size = sizeof(float) * 4;
+	for (int i = 0; i < header.joint_count; i++)
+	{
+		memcpy(&temp.r[0].m128_f32, &bind_buffer[bind_buffer_ptr], row_size); bind_buffer_ptr += row_size;
+		memcpy(&temp.r[1].m128_f32, &bind_buffer[bind_buffer_ptr], row_size); bind_buffer_ptr += row_size;
+		memcpy(&temp.r[2].m128_f32, &bind_buffer[bind_buffer_ptr], row_size); bind_buffer_ptr += row_size;
+		memcpy(&temp.r[3].m128_f32, &bind_buffer[bind_buffer_ptr], row_size); bind_buffer_ptr += row_size;
+
+		model.bind_invs[i] = XMMatrixInverse(nullptr, temp);
 	}
 
 	// Free memory

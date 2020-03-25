@@ -13,9 +13,10 @@ struct joint
 
 struct keyframe
 {
-	float time;
+	float time = 0.0f;
 	std::vector<joint> joints;
 	std::vector<XMMATRIX> xmjoints;
+	std::vector<XMFLOAT4X4> fmjoints;
 };
 
 struct animation_clip
@@ -40,6 +41,8 @@ struct AnimVertex
 {
 	WFLOAT3 position;
 	WFLOAT3 normal;
+	int joints[4];
+	float weights[4];
 	WFLOAT2 uv_diffuse;
 };
 

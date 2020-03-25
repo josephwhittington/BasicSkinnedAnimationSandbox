@@ -46,9 +46,6 @@ float3 CalcAmbient(Light light, float3 normal, float3 color)
 
 float4 computePointLight(Light plight, OutputVertex input)
 {
-    // Hard coded values
-    //float specularShininess = 50;
-    
     // Texture color
     float4 color = saturate(t_diffuse.Sample(t_sampler, input.tex));
     float3 normal = normalize(input.normal);
@@ -81,12 +78,11 @@ float4 computePointLight(Light plight, OutputVertex input)
     
     // Combine phong components
     color = saturate(float4((diffuseColor + specularColor + ambientColor + emissiveColor) * color.rgb, color.a));
-    //color = saturate(float4((ambientColor + diffuseColor + specularColor) * color.rgb, color.a));
-    //color = saturate(float4(specularColor + ambientColor, 1));
     return color;
 }
 
 float4 main(OutputVertex input) : SV_TARGET
 {
     return computePointLight(lights[0], input);
+    return t_diffuse.Sample(t_sampler, input.tex);
 }
